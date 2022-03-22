@@ -3,9 +3,31 @@
 #include "user/user.h"
 #include "kernel/fs.h"
 
+
+char*
+fmtname(char *path)
+{
+  static char buf[DIRSIZ+1];
+  char *p;
+
+  // Find first character after last slash.
+  for(p=path+strlen(path); p >= path && *p != '/'; p--)
+    ;
+  p++;
+
+  // Return blank-padded name.
+  if(strlen(p) >= DIRSIZ)
+    return p;
+  memmove(buf, p, strlen(p));
+  memset(buf+strlen(p), ' ', DIRSIZ-strlen(p));
+  return buf;
+}
+
 void
 find(char *path,char *filename)
 {
+  //buf存储完整path
+  //p存储文件名
   char buf[512], *p;
   int fd;
   struct dirent de;
@@ -22,31 +44,32 @@ find(char *path,char *filename)
     return;
   }
 
-  switch(st.type){
-  case T_FILE:
-    printf("%s %d %d %l\n", fmtname(path), st.type, st.ino, st.size);
-    break;
+  if (st.type != T_DIR) {
+    fprintf(2, "usage: find <DIRECTORY> <filename>\n");
+    return;
+  }
 
-  case T_DIR:
-    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
-      printf("ls: path too long\n");
-      break;
+  if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+    printf("ls: path too long\n");
+  }
+  strcpy(buf, path);
+  p = buf+strlen(buf);
+  *p++ = '/';
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0)
+      continue;
+    memmove(p, de.name, DIRSIZ);
+    p[DIRSIZ] = 0;
+    if(stat(buf, &st) < 0){
+      printf("ls: cannot stat %s\n", buf);
+      continue;
     }
-    strcpy(buf, path);
-    p = buf+strlen(buf);
-    *p++ = '/';
-    while(read(fd, &de, sizeof(de)) == sizeof(de)){
-      if(de.inum == 0)
-        continue;
-      memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0;
-      if(stat(buf, &st) < 0){
-        printf("ls: cannot stat %s\n", buf);
-        continue;
-      }
-      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
+    // printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, st.size);
+    if(st.type ==T_DIR && strcmp(p,".")!=0 && strcmp(p,"..")!=0){
+      find(buf,filename);
+    }else if(strcmp(p,filename) == 0){
+      printf("%s\n",buf);
     }
-    break;
   }
   close(fd);
 }
@@ -54,8 +77,6 @@ find(char *path,char *filename)
 int
 main(int argc, char *argv[])
 {
-  int i;
-
   if(argc < 3){
     fprintf(2,"command find must have parameter folder and filename");
     exit(0);

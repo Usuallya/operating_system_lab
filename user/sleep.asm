@@ -8,33 +8,33 @@ Disassembly of section .text:
 #include "kernel/types.h"
 #include "user/user.h"
 
-int main(int argc,char const *argv[]){
+int main(int argc, char const *argv[])
+{
    0:	1141                	addi	sp,sp,-16
    2:	e406                	sd	ra,8(sp)
    4:	e022                	sd	s0,0(sp)
    6:	0800                	addi	s0,sp,16
-    if(argc != 2){
+  if (argc != 2) { //参数错误
    8:	4789                	li	a5,2
    a:	02f50063          	beq	a0,a5,2a <main+0x2a>
-        fprintf(2,"usage: sleep <time> \n");
+    fprintf(2, "usage: sleep <time>\n");
    e:	00000597          	auipc	a1,0x0
   12:	7ca58593          	addi	a1,a1,1994 # 7d8 <malloc+0xe6>
   16:	4509                	li	a0,2
   18:	00000097          	auipc	ra,0x0
   1c:	5ee080e7          	jalr	1518(ra) # 606 <fprintf>
-        exit(1);
+    exit(1);
   20:	4505                	li	a0,1
   22:	00000097          	auipc	ra,0x0
   26:	29a080e7          	jalr	666(ra) # 2bc <exit>
-    }
-
-    sleep(atoi(argv[1]));
+  }
+  sleep(atoi(argv[1]));
   2a:	6588                	ld	a0,8(a1)
   2c:	00000097          	auipc	ra,0x0
   30:	190080e7          	jalr	400(ra) # 1bc <atoi>
   34:	00000097          	auipc	ra,0x0
   38:	318080e7          	jalr	792(ra) # 34c <sleep>
-    exit(0);
+  exit(0);
   3c:	4501                	li	a0,0
   3e:	00000097          	auipc	ra,0x0
   42:	27e080e7          	jalr	638(ra) # 2bc <exit>
