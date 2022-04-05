@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sysinfo.h"
 
 struct cpu cpus[NCPU];
 
@@ -294,6 +295,9 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+
+  //copy trace num from old process
+  np->tracenum = p->tracenum;
 
   release(&np->lock);
 
@@ -692,4 +696,40 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int trace(int num){
+    struct proc *p = myproc();
+    p->tracenum = num;
+    return p->tracenum;
+}
+
+int proccount(){
+    struct proc *p;
+    int count = 0;
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state != UNUSED) {
+        count++;
+      }
+      release(&p->lock);
+  }
+  return count;
+}
+
+int sysinfo(uint64 p){
+  if(p == 0){
+    return -1;
+  }
+
+  struct sysinfo info;
+
+  info.nproc = proccount();
+  info.freemem = freememcount();
+
+  struct proc *proc = myproc();
+  if(copyout(proc->pagetable,p,(char *)&info,sizeof(info)) < 0){
+    return -1;
+  }
+  return 0;
 }
