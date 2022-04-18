@@ -5,13 +5,14 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-#include "sysinfo.h"
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
 struct proc *initproc;
+
+extern pagetable_t kernel_pagetable;
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -22,6 +23,7 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern char etext[];  // kernel.ld sets this to end of kernel code.
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -35,14 +37,14 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
-  kvminithart();
+  // kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -121,7 +123,17 @@ found:
     release(&p->lock);
     return 0;
   }
-
+  //设置内核页表
+  p->kpagetable = proc_kvminit(p);
+  //设置内核栈
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  //由于用户内核页表中不需要统一划分内核栈，所以这里可以固定映射到同一个位置，并且不需要保护页
+  uint64 va = KSTACK((int) 0);
+  ukvmmap(p->kpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+  // 这里不用像在procinit那里加了内核栈映射之后一样着急刷新内核页表，因为后面在进程真正被调度时会刷
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -151,6 +163,23 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+
+  //清理内核栈，这里有一点疑问，内核栈清理了，可是现在程序还是运行在内核态，那么接下来的内核函数调用该压哪里的栈？
+  if(p->kstack){
+    pte_t * pte = walk(p->kpagetable,p->kstack,0);
+    if(pte == 0){
+      panic("freeproc:kstack is null");
+    }
+    
+    kfree((void *)PTE2PA(*pte));
+  }
+
+  p->kstack = 0;
+
+  if(p->kpagetable){
+    proc_freekpagetable(p->kpagetable);
+  }
+  p->kpagetable = 0;
 }
 
 // Create a user page table for a given process,
@@ -196,6 +225,22 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+//清除页表，不删除物理内存
+void proc_freekpagetable(pagetable_t kpagetable){
+  for(int i = 0;i<512;i++){
+    uint64 pte = kpagetable[i];
+    if(pte & PTE_V) {
+      kpagetable[i] = 0;
+      //如果不是叶子
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        uint64 child = PTE2PA(pte);
+        proc_freekpagetable((pagetable_t)child);
+      }
+    }
+  }
+  kfree(kpagetable);
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -221,6 +266,9 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  if(kvmcopy(p->pagetable,p->kpagetable,0,sizeof(initcode)) < 0){
+    panic("userinit:error to kvmcopy");
+  }
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -241,14 +289,19 @@ growproc(int n)
 {
   uint sz;
   struct proc *p = myproc();
-
   sz = p->sz;
+  uint oldsz = sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    if(kvmcopy(p->pagetable,p->kpagetable,oldsz,sz) < 0){
+      uvmdealloc(p->pagetable,sz,oldsz);
+      return -1;
+    }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    kvmdealloc(p->kpagetable,oldsz,sz);
   }
   p->sz = sz;
   return 0;
@@ -269,11 +322,14 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0 
+  || kvmcopy(np->pagetable,np->kpagetable,0,p->sz) < 0
+  ){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
+
   np->sz = p->sz;
 
   np->parent = p;
@@ -295,9 +351,6 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
-
-  //copy trace num from old process
-  np->tracenum = p->tracenum;
 
   release(&np->lock);
 
@@ -477,20 +530,27 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
+        //切换内核页表为当前进程内核页表
+        ukvminithart(p->kpagetable);
 
+        swtch(&c->context, &p->context);
+        //进程执行结束，切换回内核页表
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
-
         found = 1;
       }
       release(&p->lock);
     }
+#if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
       asm volatile("wfi");
     }
+#else
+    ;
+#endif
   }
 }
 
@@ -698,38 +758,4 @@ procdump(void)
   }
 }
 
-int trace(int num){
-    struct proc *p = myproc();
-    p->tracenum = num;
-    return p->tracenum;
-}
 
-int proccount(){
-    struct proc *p;
-    int count = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state != UNUSED) {
-        count++;
-      }
-      release(&p->lock);
-  }
-  return count;
-}
-
-int sysinfo(uint64 p){
-  if(p == 0){
-    return -1;
-  }
-
-  struct sysinfo info;
-
-  info.nproc = proccount();
-  info.freemem = freememcount();
-
-  struct proc *proc = myproc();
-  if(copyout(proc->pagetable,p,(char *)&info,sizeof(info)) < 0){
-    return -1;
-  }
-  return 0;
-}
